@@ -206,6 +206,24 @@ body {
   color: var(--accent-text);
 }
 
+.clutch-btn {
+  width: min(84%, 280px);
+  height: 110px;
+  border-radius: 22px;
+  border: 2px solid var(--accent);
+  background: var(--surface-alt);
+  color: var(--text);
+  font-size: 1rem;
+  font-weight: 700;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.clutch-btn[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
 .card {
   background: var(--surface);
   border: 1px solid var(--border);

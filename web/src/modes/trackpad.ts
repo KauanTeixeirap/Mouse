@@ -1,16 +1,313 @@
-import type { ClientMsg, Settings } from "../protocol";
+import { computeAcceleration } from "../lib/filters";
+import type { ClientMsg, KeyName, Settings } from "../protocol";
 
-export interface TrackpadHandle {
-  destroy(): void;
-  updateSettings(settings: Settings): void;
+export interface TrackpadPoint {
+  id: number;
+  x: number;
+  y: number;
+  timeMs: number;
 }
 
-interface ActivePointer {
+export type GestureCommand =
+  | { kind: "move"; dx: number; dy: number }
+  | { kind: "msg"; msg: ClientMsg }
+  | { kind: "haptic" };
+
+interface TrackedPointer {
+  id: number;
   x: number;
   y: number;
   startX: number;
   startY: number;
-  startTime: number;
+  startTimeMs: number;
+}
+
+const SINGLE_TAP_MAX_MS = 200;
+const SINGLE_TAP_MAX_PX = 8;
+const DOUBLE_TAP_WINDOW_MS = 250;
+const DOUBLE_TAP_MAX_DIST_PX = 28;
+const TWO_FINGER_TAP_MAX_MS = 250;
+const TWO_FINGER_TAP_MAX_PX = 12;
+const THREE_FINGER_SWIPE_MIN_PX = 35;
+const THREE_FINGER_TAP_MAX_MS = 300;
+const THREE_FINGER_TAP_MAX_PX = 20;
+
+export class GestureRecognizer {
+  private settings: Settings;
+  private pointers = new Map<number, TrackedPointer>();
+  private maxFingers = 0;
+  private gestureStartMs = 0;
+  private lastMoveMs = 0;
+
+  private singleMoved = false;
+  private doubleTapDragging = false;
+  private lastTapTimeMs = -Infinity;
+  private lastTapX = 0;
+  private lastTapY = 0;
+
+  private twoFingerMode: "idle" | "scroll" | "pinch" = "idle";
+  private twoCumCentroid = 0;
+  private twoCumPinch = 0;
+  private prevCentroid: { x: number; y: number } | null = null;
+  private prevDistance = 0;
+
+  private threeStartCentroid: { x: number; y: number } | null = null;
+  private threeLastCentroid: { x: number; y: number } | null = null;
+  private threeFired = false;
+
+  constructor(settings: Settings) {
+    this.settings = settings;
+  }
+
+  updateSettings(settings: Settings): void {
+    this.settings = settings;
+  }
+
+  private centroid(): { x: number; y: number } {
+    let sx = 0;
+    let sy = 0;
+    for (const p of this.pointers.values()) {
+      sx += p.x;
+      sy += p.y;
+    }
+    const n = Math.max(1, this.pointers.size);
+    return { x: sx / n, y: sy / n };
+  }
+
+  private twoFingerDistance(): number {
+    const arr = Array.from(this.pointers.values());
+    if (arr.length < 2) return 0;
+    return Math.hypot(arr[1].x - arr[0].x, arr[1].y - arr[0].y);
+  }
+
+  private keysToMsg(keys: KeyName[]): ClientMsg | null {
+    if (keys.length === 0) return null;
+    if (keys.length === 1) {
+      return { t: "key", k: keys[0], s: "tap" };
+    }
+    return { t: "combo", k: [...keys] };
+  }
+
+  onDown(pt: TrackpadPoint): GestureCommand[] {
+    const cmds: GestureCommand[] = [];
+    this.pointers.set(pt.id, {
+      id: pt.id,
+      x: pt.x,
+      y: pt.y,
+      startX: pt.x,
+      startY: pt.y,
+      startTimeMs: pt.timeMs,
+    });
+
+    const count = this.pointers.size;
+    if (count === 1) {
+      this.maxFingers = 1;
+      this.gestureStartMs = pt.timeMs;
+      this.lastMoveMs = pt.timeMs;
+      this.singleMoved = false;
+      this.twoFingerMode = "idle";
+      this.twoCumCentroid = 0;
+      this.twoCumPinch = 0;
+      this.prevCentroid = null;
+      this.threeStartCentroid = null;
+      this.threeLastCentroid = null;
+      this.threeFired = false;
+
+      if (
+        pt.timeMs - this.lastTapTimeMs <= DOUBLE_TAP_WINDOW_MS &&
+        Math.hypot(pt.x - this.lastTapX, pt.y - this.lastTapY) <= DOUBLE_TAP_MAX_DIST_PX
+      ) {
+        this.doubleTapDragging = true;
+        cmds.push({ kind: "haptic" });
+        cmds.push({ kind: "msg", msg: { t: "btn", b: "left", s: "down" } });
+      } else {
+        this.doubleTapDragging = false;
+      }
+    } else {
+      this.maxFingers = Math.max(this.maxFingers, count);
+      if (this.doubleTapDragging) {
+        this.doubleTapDragging = false;
+        cmds.push({ kind: "msg", msg: { t: "btn", b: "left", s: "up" } });
+      }
+      if (count === 2) {
+        this.twoFingerMode = "idle";
+        this.twoCumCentroid = 0;
+        this.twoCumPinch = 0;
+        this.prevCentroid = this.centroid();
+        this.prevDistance = this.twoFingerDistance();
+      } else if (count === 3) {
+        const c = this.centroid();
+        this.threeStartCentroid = c;
+        this.threeLastCentroid = c;
+        this.threeFired = false;
+        this.gestureStartMs = pt.timeMs;
+      }
+    }
+    return cmds;
+  }
+
+  onMove(pt: TrackpadPoint): GestureCommand[] {
+    const existing = this.pointers.get(pt.id);
+    if (!existing) return [];
+
+    const dxRaw = pt.x - existing.x;
+    const dyRaw = pt.y - existing.y;
+    existing.x = pt.x;
+    existing.y = pt.y;
+
+    const cmds: GestureCommand[] = [];
+    const count = this.pointers.size;
+
+    if (count === 1 && this.maxFingers === 1) {
+      const distFromStart = Math.hypot(pt.x - existing.startX, pt.y - existing.startY);
+      if (distFromStart > SINGLE_TAP_MAX_PX) {
+        this.singleMoved = true;
+      }
+      const dt = Math.max(1, pt.timeMs - this.lastMoveMs);
+      this.lastMoveMs = pt.timeMs;
+      const speed = Math.hypot(dxRaw, dyRaw) / dt;
+      const gain = computeAcceleration(
+        speed,
+        this.settings.trackpad_sensitivity,
+        this.settings.acceleration,
+      );
+      if (dxRaw !== 0 || dyRaw !== 0) {
+        cmds.push({ kind: "move", dx: dxRaw * gain, dy: dyRaw * gain });
+      }
+      return cmds;
+    }
+
+    if (count === 2 && this.maxFingers === 2) {
+      const c = this.centroid();
+      const dist = this.twoFingerDistance();
+      if (this.prevCentroid === null) {
+        this.prevCentroid = c;
+        this.prevDistance = dist;
+        return cmds;
+      }
+
+      const dcx = c.x - this.prevCentroid.x;
+      const dcy = c.y - this.prevCentroid.y;
+      const dDist = dist - this.prevDistance;
+      this.prevCentroid = c;
+      this.prevDistance = dist;
+
+      if (this.twoFingerMode === "idle") {
+        this.twoCumCentroid += Math.hypot(dcx, dcy);
+        this.twoCumPinch += Math.abs(dDist);
+        if (this.twoCumPinch >= TWO_FINGER_TAP_MAX_PX && this.twoCumPinch > this.twoCumCentroid) {
+          this.twoFingerMode = "pinch";
+        } else if (this.twoCumCentroid >= TWO_FINGER_TAP_MAX_PX) {
+          this.twoFingerMode = "scroll";
+        }
+      }
+
+      if (this.twoFingerMode === "pinch" && dDist !== 0) {
+        cmds.push({ kind: "msg", msg: { t: "zoom", d: dDist * 0.08 } });
+      } else if (this.twoFingerMode === "scroll" && (dcx !== 0 || dcy !== 0)) {
+        const dir = this.settings.natural_scroll ? 1 : -1;
+        const scale = 0.15 * this.settings.scroll_speed * dir;
+        cmds.push({ kind: "msg", msg: { t: "scroll", dx: dcx * scale, dy: dcy * scale } });
+      }
+      return cmds;
+    }
+
+    if (count === 3) {
+      this.threeLastCentroid = this.centroid();
+    }
+
+    return cmds;
+  }
+
+  onUp(pt: TrackpadPoint): GestureCommand[] {
+    const existing = this.pointers.get(pt.id);
+    if (!existing) return [];
+    existing.x = pt.x;
+    existing.y = pt.y;
+
+    const cmds: GestureCommand[] = [];
+
+    if (this.pointers.size === 3 && this.maxFingers === 3 && !this.threeFired) {
+      const start = this.threeStartCentroid;
+      const end = this.threeLastCentroid ?? this.centroid();
+      if (start) {
+        const dx = end.x - start.x;
+        const dy = end.y - start.y;
+        const dist = Math.hypot(dx, dy);
+        const elapsed = pt.timeMs - this.gestureStartMs;
+        let actionKeys: KeyName[] | null = null;
+        if (dist >= THREE_FINGER_SWIPE_MIN_PX) {
+          if (Math.abs(dx) > Math.abs(dy)) {
+            actionKeys = dx > 0 ? this.settings.three_finger.right : this.settings.three_finger.left;
+          } else {
+            actionKeys = dy < 0 ? this.settings.three_finger.up : this.settings.three_finger.down;
+          }
+        } else if (elapsed < THREE_FINGER_TAP_MAX_MS && dist < THREE_FINGER_TAP_MAX_PX) {
+          actionKeys = this.settings.three_finger.tap;
+        }
+        if (actionKeys) {
+          const msg = this.keysToMsg(actionKeys);
+          if (msg) {
+            this.threeFired = true;
+            cmds.push({ kind: "haptic" });
+            cmds.push({ kind: "msg", msg });
+          }
+        }
+      }
+    }
+
+    this.pointers.delete(pt.id);
+
+    if (this.pointers.size === 0) {
+      const elapsed = pt.timeMs - this.gestureStartMs;
+      const dist = Math.hypot(pt.x - existing.startX, pt.y - existing.startY);
+
+      if (this.doubleTapDragging) {
+        this.doubleTapDragging = false;
+        this.lastTapTimeMs = -Infinity;
+        cmds.push({ kind: "msg", msg: { t: "btn", b: "left", s: "up" } });
+        return cmds;
+      }
+
+      if (this.maxFingers === 1 && !this.singleMoved && elapsed < SINGLE_TAP_MAX_MS && dist < SINGLE_TAP_MAX_PX) {
+        this.lastTapTimeMs = pt.timeMs;
+        this.lastTapX = pt.x;
+        this.lastTapY = pt.y;
+        cmds.push({ kind: "haptic" });
+        cmds.push({ kind: "msg", msg: { t: "btn", b: "left", s: "click" } });
+      } else if (
+        this.maxFingers === 2 &&
+        this.twoFingerMode === "idle" &&
+        elapsed < TWO_FINGER_TAP_MAX_MS &&
+        this.twoCumCentroid < TWO_FINGER_TAP_MAX_PX &&
+        this.twoCumPinch < TWO_FINGER_TAP_MAX_PX
+      ) {
+        cmds.push({ kind: "haptic" });
+        cmds.push({ kind: "msg", msg: { t: "btn", b: "right", s: "click" } });
+      }
+
+      this.maxFingers = 0;
+    }
+
+    return cmds;
+  }
+
+  onCancel(id: number): GestureCommand[] {
+    this.pointers.delete(id);
+    if (this.pointers.size === 0) {
+      this.maxFingers = 0;
+      if (this.doubleTapDragging) {
+        this.doubleTapDragging = false;
+        return [{ kind: "msg", msg: { t: "btn", b: "left", s: "up" } }];
+      }
+    }
+    return [];
+  }
+}
+
+export interface TrackpadHandle {
+  destroy(): void;
+  updateSettings(settings: Settings): void;
 }
 
 export function attachTrackpad(
@@ -20,72 +317,45 @@ export function attachTrackpad(
   emitMsg: (msg: ClientMsg) => void,
   haptic: () => void,
 ): TrackpadHandle {
-  let settings = initialSettings;
-  const pointers = new Map<number, ActivePointer>();
-  let primaryMoved = false;
+  const recognizer = new GestureRecognizer(initialSettings);
 
-  const onPointerDown = (e: PointerEvent) => {
+  const dispatch = (commands: GestureCommand[]) => {
+    for (const cmd of commands) {
+      if (cmd.kind === "move") emitMove(cmd.dx, cmd.dy);
+      else if (cmd.kind === "msg") emitMsg(cmd.msg);
+      else haptic();
+    }
+  };
+
+  const toPoint = (e: PointerEvent): TrackpadPoint => ({
+    id: e.pointerId,
+    x: e.clientX,
+    y: e.clientY,
+    timeMs: e.timeStamp || performance.now(),
+  });
+
+  const onDown = (e: PointerEvent) => {
     surface.setPointerCapture?.(e.pointerId);
-    pointers.set(e.pointerId, {
-      x: e.clientX,
-      y: e.clientY,
-      startX: e.clientX,
-      startY: e.clientY,
-      startTime: e.timeStamp || performance.now(),
-    });
-    if (pointers.size === 1) {
-      primaryMoved = false;
-    }
+    dispatch(recognizer.onDown(toPoint(e)));
   };
+  const onMove = (e: PointerEvent) => dispatch(recognizer.onMove(toPoint(e)));
+  const onUp = (e: PointerEvent) => dispatch(recognizer.onUp(toPoint(e)));
+  const onCancel = (e: PointerEvent) => dispatch(recognizer.onCancel(e.pointerId));
 
-  const onPointerMove = (e: PointerEvent) => {
-    const ptr = pointers.get(e.pointerId);
-    if (!ptr) return;
-    const dx = e.clientX - ptr.x;
-    const dy = e.clientY - ptr.y;
-    ptr.x = e.clientX;
-    ptr.y = e.clientY;
-
-    if (pointers.size === 1) {
-      const dist = Math.hypot(ptr.x - ptr.startX, ptr.y - ptr.startY);
-      if (dist > 8) primaryMoved = true;
-      emitMove(dx * settings.trackpad_sensitivity, dy * settings.trackpad_sensitivity);
-    }
-  };
-
-  const onPointerUp = (e: PointerEvent) => {
-    const ptr = pointers.get(e.pointerId);
-    const countBefore = pointers.size;
-    pointers.delete(e.pointerId);
-    if (!ptr) return;
-
-    const elapsed = (e.timeStamp || performance.now()) - ptr.startTime;
-    const dist = Math.hypot(e.clientX - ptr.startX, e.clientY - ptr.startY);
-    if (countBefore === 1 && !primaryMoved && elapsed < 200 && dist < 8) {
-      haptic();
-      emitMsg({ t: "btn", b: "left", s: "click" });
-    }
-  };
-
-  const onPointerCancel = (e: PointerEvent) => {
-    pointers.delete(e.pointerId);
-  };
-
-  surface.addEventListener("pointerdown", onPointerDown);
-  surface.addEventListener("pointermove", onPointerMove);
-  surface.addEventListener("pointerup", onPointerUp);
-  surface.addEventListener("pointercancel", onPointerCancel);
+  surface.addEventListener("pointerdown", onDown);
+  surface.addEventListener("pointermove", onMove);
+  surface.addEventListener("pointerup", onUp);
+  surface.addEventListener("pointercancel", onCancel);
 
   return {
     updateSettings(next: Settings) {
-      settings = next;
+      recognizer.updateSettings(next);
     },
     destroy() {
-      surface.removeEventListener("pointerdown", onPointerDown);
-      surface.removeEventListener("pointermove", onPointerMove);
-      surface.removeEventListener("pointerup", onPointerUp);
-      surface.removeEventListener("pointercancel", onPointerCancel);
-      pointers.clear();
+      surface.removeEventListener("pointerdown", onDown);
+      surface.removeEventListener("pointermove", onMove);
+      surface.removeEventListener("pointerup", onUp);
+      surface.removeEventListener("pointercancel", onCancel);
     },
   };
 }

@@ -1,4 +1,5 @@
 import { renderBasicKeyboardPanel } from "./keyboard/keyboard";
+import { type GyroHandle, renderGyroView } from "./modes/gyro";
 import { attachTrackpad, type TrackpadHandle } from "./modes/trackpad";
 import { type ConnectionState, MouseSocket } from "./net/socket";
 import {
@@ -21,6 +22,7 @@ export function startApp(root: HTMLElement): void {
   let connState: ConnectionState = "disconnected";
   let latencyMs: number | null = null;
   let trackpadHandle: TrackpadHandle | null = null;
+  let gyroHandle: GyroHandle | null = null;
   let cleanupView: (() => void) | null = null;
 
   const haptic = () => {
@@ -44,6 +46,7 @@ export function startApp(root: HTMLElement): void {
         settings = msg.settings;
         profiles = msg.profiles;
         trackpadHandle?.updateSettings(settings);
+        gyroHandle?.updateSettings(settings);
         render();
       } else if (msg.t === "error" && msg.code === "unauthorized") {
         clearStoredToken();
@@ -151,8 +154,39 @@ export function startApp(root: HTMLElement): void {
   function cleanupActiveViews(): void {
     trackpadHandle?.destroy();
     trackpadHandle = null;
+    gyroHandle?.destroy();
+    gyroHandle = null;
     cleanupView?.();
     cleanupView = null;
+  }
+
+  function buildMouseButtonsRow(): HTMLElement {
+    const btnRow = document.createElement("div");
+    btnRow.className = "mouse-buttons";
+    const leftBtn = document.createElement("button");
+    leftBtn.type = "button";
+    leftBtn.className = "mouse-btn";
+    leftBtn.textContent = "Esquerdo";
+    leftBtn.addEventListener("pointerdown", () => {
+      haptic();
+      emitMsg({ t: "btn", b: "left", s: "down" });
+    });
+    leftBtn.addEventListener("pointerup", () => emitMsg({ t: "btn", b: "left", s: "up" }));
+    leftBtn.addEventListener("pointercancel", () => emitMsg({ t: "btn", b: "left", s: "up" }));
+
+    const rightBtn = document.createElement("button");
+    rightBtn.type = "button";
+    rightBtn.className = "mouse-btn";
+    rightBtn.textContent = "Direito";
+    rightBtn.addEventListener("pointerdown", () => {
+      haptic();
+      emitMsg({ t: "btn", b: "right", s: "down" });
+    });
+    rightBtn.addEventListener("pointerup", () => emitMsg({ t: "btn", b: "right", s: "up" }));
+    rightBtn.addEventListener("pointercancel", () => emitMsg({ t: "btn", b: "right", s: "up" }));
+
+    btnRow.append(leftBtn, rightBtn);
+    return btnRow;
   }
 
   function render(): void {
@@ -213,7 +247,7 @@ export function startApp(root: HTMLElement): void {
     if (activeTab === "trackpad") {
       const surface = document.createElement("div");
       surface.className = "touch-surface";
-      surface.textContent = "Deslize para mover · Toque para clicar";
+      surface.textContent = "Deslize para mover · 2 dedos: rolar/pinça · 3 dedos: atalhos";
       trackpadHandle = attachTrackpad(
         surface,
         settings,
@@ -222,39 +256,22 @@ export function startApp(root: HTMLElement): void {
         haptic,
       );
 
-      const btnRow = document.createElement("div");
-      btnRow.className = "mouse-buttons";
-      const leftBtn = document.createElement("button");
-      leftBtn.type = "button";
-      leftBtn.className = "mouse-btn";
-      leftBtn.textContent = "Esquerdo";
-      leftBtn.addEventListener("pointerdown", () => {
-        haptic();
-        emitMsg({ t: "btn", b: "left", s: "down" });
-      });
-      leftBtn.addEventListener("pointerup", () => emitMsg({ t: "btn", b: "left", s: "up" }));
-      leftBtn.addEventListener("pointercancel", () => emitMsg({ t: "btn", b: "left", s: "up" }));
-
-      const rightBtn = document.createElement("button");
-      rightBtn.type = "button";
-      rightBtn.className = "mouse-btn";
-      rightBtn.textContent = "Direito";
-      rightBtn.addEventListener("pointerdown", () => {
-        haptic();
-        emitMsg({ t: "btn", b: "right", s: "down" });
-      });
-      rightBtn.addEventListener("pointerup", () => emitMsg({ t: "btn", b: "right", s: "up" }));
-      rightBtn.addEventListener("pointercancel", () => emitMsg({ t: "btn", b: "right", s: "up" }));
-
-      btnRow.append(leftBtn, rightBtn);
-      main.append(surface, btnRow);
+      main.append(surface, buildMouseButtonsRow());
     } else if (activeTab === "keyboard") {
       cleanupView = renderBasicKeyboardPanel(main, emitMsg);
     } else if (activeTab === "gyro") {
-      const surface = document.createElement("div");
-      surface.className = "touch-surface";
-      surface.textContent = "Modo Giroscópio disponível na Fase 2.";
-      main.appendChild(surface);
+      const gyroHost = document.createElement("div");
+      gyroHost.style.flex = "1";
+      gyroHost.style.minHeight = "0";
+      gyroHost.style.display = "flex";
+      gyroHandle = renderGyroView(
+        gyroHost,
+        settings,
+        (dx, dy) => socket.queueMove(dx, dy),
+        emitMsg,
+        haptic,
+      );
+      main.append(gyroHost, buildMouseButtonsRow());
     } else {
       const card = document.createElement("div");
       card.className = "card";

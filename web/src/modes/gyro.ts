@@ -220,6 +220,51 @@ export function renderGyroView(
     remoteBar.appendChild(btn);
   }
 
+  // Lateral scroll strip (attached to the right edge, below Vol + and above Direito)
+  const scrollStrip = document.createElement("div");
+  scrollStrip.className = "gyro-scroll";
+  scrollStrip.setAttribute("role", "slider");
+  scrollStrip.setAttribute("aria-orientation", "vertical");
+  scrollStrip.setAttribute("aria-label", "Rolar página");
+  scrollStrip.title = "Puxe para cima ou para baixo para rolar a página";
+  scrollStrip.innerHTML = `<svg viewBox="0 0 24 64" width="20" height="54" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="7 12 12 7 17 12"/><line x1="7" y1="26" x2="17" y2="26"/><line x1="7" y1="32" x2="17" y2="32"/><line x1="7" y1="38" x2="17" y2="38"/><polyline points="7 52 12 57 17 52"/></svg>`;
+
+  let scrollPointerId: number | null = null;
+  let lastScrollY = 0;
+
+  const onScrollDown = (e: PointerEvent) => {
+    e.stopPropagation();
+    scrollStrip.setPointerCapture?.(e.pointerId);
+    scrollPointerId = e.pointerId;
+    lastScrollY = e.clientY;
+    scrollStrip.dataset.active = "true";
+    haptic();
+  };
+
+  const onScrollMove = (e: PointerEvent) => {
+    e.stopPropagation();
+    if (scrollPointerId !== e.pointerId) return;
+    const dyRaw = e.clientY - lastScrollY;
+    lastScrollY = e.clientY;
+    if (dyRaw === 0) return;
+    const dir = settings.natural_scroll ? 1 : -1;
+    const scale = 0.15 * settings.scroll_speed * dir;
+    emitMsg({ t: "scroll", dx: 0, dy: dyRaw * scale });
+  };
+
+  const onScrollUp = (e: PointerEvent) => {
+    e.stopPropagation();
+    if (scrollPointerId === e.pointerId) {
+      scrollPointerId = null;
+      delete scrollStrip.dataset.active;
+    }
+  };
+
+  scrollStrip.addEventListener("pointerdown", onScrollDown);
+  scrollStrip.addEventListener("pointermove", onScrollMove);
+  scrollStrip.addEventListener("pointerup", onScrollUp);
+  scrollStrip.addEventListener("pointercancel", onScrollUp);
+
   // Surface still accepts 1-finger tap (left click) and 2-finger tap (right click)
   const handleTapCmds = (cmds: ReturnType<GestureRecognizer["onDown"]>) => {
     for (const cmd of cmds) {
@@ -228,7 +273,7 @@ export function renderGyroView(
     }
   };
   const onSurfaceDown = (e: PointerEvent) => {
-    if ((e.target as HTMLElement | null)?.closest("button")) return;
+    if ((e.target as HTMLElement | null)?.closest("button, .gyro-scroll")) return;
     surface.setPointerCapture?.(e.pointerId);
     handleTapCmds(
       tapRecognizer.onDown({
@@ -240,7 +285,7 @@ export function renderGyroView(
     );
   };
   const onSurfaceUp = (e: PointerEvent) => {
-    if ((e.target as HTMLElement | null)?.closest("button")) return;
+    if ((e.target as HTMLElement | null)?.closest("button, .gyro-scroll")) return;
     handleTapCmds(
       tapRecognizer.onUp({
         id: e.pointerId,
@@ -307,7 +352,7 @@ export function renderGyroView(
 
   void attachMotionListener();
 
-  surface.append(centerBtn, statusText, clutchBtn, remoteBar);
+  surface.append(centerBtn, statusText, clutchBtn, remoteBar, scrollStrip);
   container.appendChild(surface);
 
   return {
@@ -327,6 +372,10 @@ export function renderGyroView(
       clutchBtn.removeEventListener("pointerdown", onClutchDown);
       clutchBtn.removeEventListener("pointerup", onClutchUp);
       clutchBtn.removeEventListener("pointercancel", onClutchUp);
+      scrollStrip.removeEventListener("pointerdown", onScrollDown);
+      scrollStrip.removeEventListener("pointermove", onScrollMove);
+      scrollStrip.removeEventListener("pointerup", onScrollUp);
+      scrollStrip.removeEventListener("pointercancel", onScrollUp);
       surface.removeEventListener("pointerdown", onSurfaceDown);
       surface.removeEventListener("pointerup", onSurfaceUp);
       surface.removeEventListener("pointercancel", onSurfaceCancel);

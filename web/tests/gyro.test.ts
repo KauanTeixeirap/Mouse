@@ -190,4 +190,56 @@ describe("GyroProcessor and OneEuroFilter", () => {
 
     handle.destroy();
   });
+
+  it("renders lateral scroll strip inside gyro surface and emits vertical scroll on drag without firing surface clicks", () => {
+    const host = document.createElement("div");
+    const emitted: ClientMsg[] = [];
+    const emitMove = vi.fn();
+    const haptic = vi.fn();
+    const settings = structuredClone(DEFAULT_SETTINGS);
+    settings.natural_scroll = true;
+    settings.scroll_speed = 1.0;
+
+    const handle = renderGyroView(
+      host,
+      settings,
+      emitMove,
+      (msg) => emitted.push(msg),
+      haptic,
+    );
+
+    const scrollStrip = host.querySelector<HTMLElement>(".gyro-scroll");
+    expect(scrollStrip).not.toBeNull();
+
+    const makePtr = (type: string, clientY: number) =>
+      Object.assign(new Event(type, { bubbles: true }), { pointerId: 7, clientY });
+
+    scrollStrip!.dispatchEvent(makePtr("pointerdown", 100));
+    expect(scrollStrip!.dataset.active).toBe("true");
+    scrollStrip!.dispatchEvent(makePtr("pointermove", 140));
+    scrollStrip!.dispatchEvent(makePtr("pointermove", 120));
+    scrollStrip!.dispatchEvent(makePtr("pointerup", 120));
+    expect(scrollStrip!.dataset.active).toBeUndefined();
+
+    expect(emitted).toEqual([
+      { t: "scroll", dx: 0, dy: 40 * 0.15 },
+      { t: "scroll", dx: 0, dy: -20 * 0.15 },
+    ]);
+    expect(emitted.some((m) => m.t === "btn")).toBe(false);
+
+    // Inverted scroll when natural_scroll is false
+    emitted.length = 0;
+    const inverted = structuredClone(DEFAULT_SETTINGS);
+    inverted.natural_scroll = false;
+    inverted.scroll_speed = 2.0;
+    handle.updateSettings(inverted);
+
+    scrollStrip!.dispatchEvent(makePtr("pointerdown", 200));
+    scrollStrip!.dispatchEvent(makePtr("pointermove", 220));
+    scrollStrip!.dispatchEvent(makePtr("pointerup", 220));
+
+    expect(emitted).toEqual([{ t: "scroll", dx: 0, dy: -20 * 0.15 * 2.0 }]);
+
+    handle.destroy();
+  });
 });

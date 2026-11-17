@@ -68,10 +68,28 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _configure_frozen_stdio(data_dir: Path) -> None:
+    """Ensure stdout/stderr are valid streams in --windowed PyInstaller builds."""
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    try:
+        log_path = data_dir / "mouse.log"
+        stream = log_path.open("a", encoding="utf-8", buffering=1)
+    except OSError:
+        import os
+
+        stream = open(os.devnull, "w", encoding="utf-8")
+    if sys.stdout is None:
+        sys.stdout = stream
+    if sys.stderr is None:
+        sys.stderr = stream
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     data_dir = args.data_dir if args.data_dir is not None else get_default_data_dir()
     data_dir.mkdir(parents=True, exist_ok=True)
+    _configure_frozen_stdio(data_dir)
 
     hostname = get_hostname()
     ips = get_lan_ips()
@@ -118,12 +136,14 @@ def main(argv: list[str] | None = None) -> int:
         ssl_certfile=str(bundle.server_cert),
         ssl_keyfile=str(bundle.server_key),
         log_level="info",
+        log_config=None if getattr(sys, "frozen", False) else uvicorn.config.LOGGING_CONFIG,
     )
     http_config = uvicorn.Config(
         setup_app,
         host="0.0.0.0",
         port=args.http_port,
         log_level="warning",
+        log_config=None if getattr(sys, "frozen", False) else uvicorn.config.LOGGING_CONFIG,
     )
 
     https_server = uvicorn.Server(https_config)

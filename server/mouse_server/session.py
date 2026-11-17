@@ -24,6 +24,7 @@ class SessionManager:
     def __init__(self, on_status_change: Callable[[str | None], None] | None = None) -> None:
         self._lock = asyncio.Lock()
         self._active: ActiveSession | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._on_status_change = on_status_change
 
     @property
@@ -38,6 +39,7 @@ class SessionManager:
         """Register a new controller session, kicking any previous active session."""
         previous: ActiveSession | None = None
         async with self._lock:
+            self._loop = asyncio.get_running_loop()
             if self._active is not None and self._active.websocket is not websocket:
                 previous = self._active
             self._active = ActiveSession(
@@ -75,3 +77,8 @@ class SessionManager:
                 await target.websocket.close(code=4401, reason="revoked")
             except Exception:
                 pass
+
+    def kick_device_sync(self, device_id: str) -> None:
+        """Thread-safe kick callable from synchronous tray callbacks."""
+        if self._loop is not None and self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(self.kick_device(device_id), self._loop)

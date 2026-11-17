@@ -197,8 +197,12 @@ class ErrorMsg(BaseModel):
     code: str
 
 
+class TextFocusMsg(BaseModel):
+    t: Literal["text_focus"] = "text_focus"
+
+
 ServerMsg = Annotated[
-    WelcomeMsg | KickedMsg | PongMsg | ErrorMsg,
+    WelcomeMsg | KickedMsg | PongMsg | ErrorMsg | TextFocusMsg,
     Field(discriminator="t"),
 ]
 

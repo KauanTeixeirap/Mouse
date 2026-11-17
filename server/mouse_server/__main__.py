@@ -115,6 +115,27 @@ def main(argv: list[str] | None = None) -> int:
             "ips": get_lan_ips(),
         }
 
+    extra_ips: set[str] = set()
+    https_config_ref: dict[str, uvicorn.Config | None] = {"config": None}
+
+    def _reload_certs(current_ips: list[str]) -> None:
+        nonlocal bundle
+        merged_ips = list(dict.fromkeys([*current_ips, *sorted(extra_ips)]))
+        bundle = ensure_certs(data_dir, ips=merged_ips, hostname=hostname)
+        cfg = https_config_ref["config"]
+        if cfg is not None and cfg.ssl is not None:
+            try:
+                cfg.ssl.load_cert_chain(
+                    certfile=str(bundle.server_cert),
+                    keyfile=str(bundle.server_key),
+                )
+            except OSError:
+                pass
+
+    def ensure_host_ip(host_ip: str) -> None:
+        extra_ips.add(host_ip)
+        _reload_certs(get_lan_ips())
+
     app = create_app(
         config_manager=config_manager,
         pairing_manager=pairing_manager,
@@ -127,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
         ca_cert_path=bundle.ca_cert,
         get_https_url=lambda: f"https://{get_primary_ip()}:{args.https_port}",
         get_fingerprint=lambda: bundle.fingerprint,
+        ensure_host_ip=ensure_host_ip,
     )
 
     https_config = uvicorn.Config(
@@ -138,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
         log_level="info",
         log_config=None if getattr(sys, "frozen", False) else uvicorn.config.LOGGING_CONFIG,
     )
+    https_config_ref["config"] = https_config
     http_config = uvicorn.Config(
         setup_app,
         host="0.0.0.0",
@@ -150,16 +173,7 @@ def main(argv: list[str] | None = None) -> int:
     http_server = uvicorn.Server(http_config)
 
     def on_ip_change(new_ips: list[str]) -> None:
-        nonlocal bundle
-        bundle = ensure_certs(data_dir, ips=new_ips, hostname=hostname)
-        if https_config.ssl is not None:
-            try:
-                https_config.ssl.load_cert_chain(
-                    certfile=str(bundle.server_cert),
-                    keyfile=str(bundle.server_key),
-                )
-            except OSError:
-                pass
+        _reload_certs(new_ips)
         tray = status_holder.get("tray")
         if tray is not None and hasattr(tray, "on_ip_changed"):
             tray.on_ip_changed(new_ips)

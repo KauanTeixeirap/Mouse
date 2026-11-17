@@ -110,4 +110,5 @@ export type ServerMsg =
   | { t: "welcome"; active_profile: string; settings: Settings; profiles: string[] }
   | { t: "kicked"; reason: "other_device" }
   | { t: "pong"; ts: number }
-  | { t: "error"; code: string };
+  | { t: "error"; code: string }
+  | { t: "text_focus" };

@@ -28,6 +28,7 @@ const DOUBLE_TAP_WINDOW_MS = 250;
 const DOUBLE_TAP_MAX_DIST_PX = 28;
 const TWO_FINGER_TAP_MAX_MS = 250;
 const TWO_FINGER_TAP_MAX_PX = 12;
+const TWO_FINGER_PINCH_MIN_PX = 28;
 const THREE_FINGER_SWIPE_MIN_PX = 35;
 const THREE_FINGER_TAP_MAX_MS = 300;
 const THREE_FINGER_TAP_MAX_PX = 20;
@@ -48,6 +49,10 @@ export class GestureRecognizer {
   private twoFingerMode: "idle" | "scroll" | "pinch" = "idle";
   private twoCumCentroid = 0;
   private twoCumPinch = 0;
+  private twoStartCentroid: { x: number; y: number } | null = null;
+  private twoStartDistance = 0;
+  private twoMovedIds = new Set<number>();
+  private zoomRemainder = 0;
   private prevCentroid: { x: number; y: number } | null = null;
   private prevDistance = 0;
 
@@ -108,6 +113,10 @@ export class GestureRecognizer {
       this.twoFingerMode = "idle";
       this.twoCumCentroid = 0;
       this.twoCumPinch = 0;
+      this.twoStartCentroid = null;
+      this.twoStartDistance = 0;
+      this.twoMovedIds.clear();
+      this.zoomRemainder = 0;
       this.prevCentroid = null;
       this.threeStartCentroid = null;
       this.threeLastCentroid = null;
@@ -130,11 +139,17 @@ export class GestureRecognizer {
         cmds.push({ kind: "msg", msg: { t: "btn", b: "left", s: "up" } });
       }
       if (count === 2) {
+        const c = this.centroid();
+        const dist = this.twoFingerDistance();
         this.twoFingerMode = "idle";
         this.twoCumCentroid = 0;
         this.twoCumPinch = 0;
-        this.prevCentroid = this.centroid();
-        this.prevDistance = this.twoFingerDistance();
+        this.twoStartCentroid = c;
+        this.twoStartDistance = dist;
+        this.twoMovedIds.clear();
+        this.zoomRemainder = 0;
+        this.prevCentroid = c;
+        this.prevDistance = dist;
       } else if (count === 3) {
         const c = this.centroid();
         this.threeStartCentroid = c;
@@ -178,9 +193,12 @@ export class GestureRecognizer {
     }
 
     if (count === 2 && this.maxFingers === 2) {
+      this.twoMovedIds.add(pt.id);
       const c = this.centroid();
       const dist = this.twoFingerDistance();
-      if (this.prevCentroid === null) {
+      if (this.prevCentroid === null || this.twoStartCentroid === null) {
+        this.twoStartCentroid = c;
+        this.twoStartDistance = dist;
         this.prevCentroid = c;
         this.prevDistance = dist;
         return cmds;
@@ -192,18 +210,46 @@ export class GestureRecognizer {
       this.prevCentroid = c;
       this.prevDistance = dist;
 
+      const netCentroid = Math.hypot(
+        c.x - this.twoStartCentroid.x,
+        c.y - this.twoStartCentroid.y,
+      );
+      const netPinch = Math.abs(dist - this.twoStartDistance);
+      this.twoCumCentroid = Math.max(this.twoCumCentroid, netCentroid);
+      this.twoCumPinch = Math.max(this.twoCumPinch, netPinch);
+
+      const pts = Array.from(this.pointers.values());
+      const v1x = pts[0].x - pts[0].startX;
+      const v1y = pts[0].y - pts[0].startY;
+      const v2x = pts[1].x - pts[1].startX;
+      const v2y = pts[1].y - pts[1].startY;
+      const vDot = v1x * v2x + v1y * v2y;
+
+      let enteredPinch = false;
       if (this.twoFingerMode === "idle") {
-        this.twoCumCentroid += Math.hypot(dcx, dcy);
-        this.twoCumPinch += Math.abs(dDist);
-        if (this.twoCumPinch >= TWO_FINGER_TAP_MAX_PX && this.twoCumPinch > this.twoCumCentroid) {
-          this.twoFingerMode = "pinch";
-        } else if (this.twoCumCentroid >= TWO_FINGER_TAP_MAX_PX) {
+        if (
+          netCentroid >= TWO_FINGER_TAP_MAX_PX &&
+          (vDot > 0 || netCentroid >= netPinch)
+        ) {
           this.twoFingerMode = "scroll";
+        } else if (
+          this.twoMovedIds.size >= 2 &&
+          vDot <= 0 &&
+          netPinch >= TWO_FINGER_PINCH_MIN_PX &&
+          netPinch > netCentroid * 1.6
+        ) {
+          this.twoFingerMode = "pinch";
+          enteredPinch = true;
         }
       }
 
-      if (this.twoFingerMode === "pinch" && dDist !== 0) {
-        cmds.push({ kind: "msg", msg: { t: "zoom", d: dDist * 0.08 } });
+      if (this.twoFingerMode === "pinch") {
+        const deltaPinch = enteredPinch ? dist - this.twoStartDistance : dDist;
+        this.zoomRemainder += deltaPinch * 0.08;
+        if (Math.abs(this.zoomRemainder) >= 0.5) {
+          cmds.push({ kind: "msg", msg: { t: "zoom", d: this.zoomRemainder } });
+          this.zoomRemainder = 0;
+        }
       } else if (this.twoFingerMode === "scroll" && (dcx !== 0 || dcy !== 0)) {
         const dir = this.settings.natural_scroll ? 1 : -1;
         const scale = 0.15 * this.settings.scroll_speed * dir;

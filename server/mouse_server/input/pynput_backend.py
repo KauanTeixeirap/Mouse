@@ -6,7 +6,7 @@ from threading import RLock
 from typing import Any
 
 from .base import ButtonName, ButtonState, InputBackend, KeyState
-from .monitors import center_cursor_on_current_monitor
+from .monitors import center_cursor_on_current_monitor, is_cursor_on_editable
 
 
 class PynputBackend(InputBackend):
@@ -58,6 +58,15 @@ class PynputBackend(InputBackend):
         self._dy_remainder = 0.0
         self._sx_remainder = 0.0
         self._sy_remainder = 0.0
+        self._zoom_remainder = 0.0
+
+    def reset_remainders(self) -> None:
+        with self._lock:
+            self._dx_remainder = 0.0
+            self._dy_remainder = 0.0
+            self._sx_remainder = 0.0
+            self._sy_remainder = 0.0
+            self._zoom_remainder = 0.0
 
     def _resolve_key(self, key_name: str) -> Any:
         normalized = key_name.strip().lower()
@@ -105,12 +114,14 @@ class PynputBackend(InputBackend):
         if delta == 0:
             return
         with self._lock:
+            total = delta + self._zoom_remainder
+            steps = int(round(total))
+            self._zoom_remainder = total - steps
+            if steps == 0:
+                return
             ctrl = self._key_map["ctrl"]
             self._keyboard.press(ctrl)
             try:
-                steps = int(round(delta))
-                if steps == 0:
-                    steps = 1 if delta > 0 else -1
                 self._mouse.scroll(0, steps)
             finally:
                 self._keyboard.release(ctrl)
@@ -155,6 +166,9 @@ class PynputBackend(InputBackend):
         with self._lock:
             center_cursor_on_current_monitor()
 
+    def is_editable_focused(self) -> bool:
+        return is_cursor_on_editable()
+
     def release_all(self) -> None:
         with self._lock:
             for btn in list(self.pressed_buttons):
@@ -170,3 +184,4 @@ class PynputBackend(InputBackend):
                 except Exception:
                     pass
             self.pressed_keys.clear()
+            self.reset_remainders()

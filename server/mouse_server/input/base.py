@@ -52,3 +52,7 @@ class InputBackend(ABC):
     @abstractmethod
     def release_all(self) -> None:
         """Release all currently pressed buttons and keys."""
+
+    def is_editable_focused(self) -> bool:
+        """Return True if the OS cursor or focused control is an editable text field."""
+        return False

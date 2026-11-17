@@ -1,41 +1,101 @@
-import { describe, expect, it } from "vitest";
+// @vitest-environment jsdom
+import { describe, expect, it, vi } from "vitest";
 import { OneEuroFilter } from "../src/lib/filters";
-import { GyroProcessor } from "../src/modes/gyro";
-import { DEFAULT_SETTINGS } from "../src/protocol";
+import { GyroProcessor, renderGyroView } from "../src/modes/gyro";
+import { type ClientMsg, DEFAULT_SETTINGS } from "../src/protocol";
 
 describe("GyroProcessor and OneEuroFilter", () => {
-  it("projects rotation around gravity consistently when phone is flat vs upright", () => {
-    const flat = new GyroProcessor(structuredClone(DEFAULT_SETTINGS), 0);
-    flat.processSample({ alpha: 0, beta: 0, gamma: 0, gx: 0, gy: 0, gz: 9.81, timestampMs: 0 });
-    // Turning right with flat phone => negative alpha
-    const flatRight = flat.processSample({
-      alpha: -40,
-      beta: 20,
+  it("maps pitch (alpha) to vertical dy, XY-plane compass rotation (gamma) to horizontal dx, and ignores lateral roll (beta)", () => {
+    const gyro = new GyroProcessor(structuredClone(DEFAULT_SETTINGS), 0);
+    gyro.processSample({ alpha: 0, beta: 0, gamma: 0, gx: 0, gy: 0, gz: 9.81, timestampMs: 0 });
+
+    // Moving phone tip up (alpha > 0) => cursor moves up (dy < 0, dx === 0)
+    const tipUp = gyro.processSample({
+      alpha: 40,
+      beta: 0,
       gamma: 0,
       gx: 0,
       gy: 0,
       gz: 9.81,
       timestampMs: 16,
     });
-    expect(flatRight).not.toBeNull();
-    expect(flatRight!.dx).toBeGreaterThan(0);
-    expect(flatRight!.dy).toBeLessThan(0);
+    expect(tipUp).not.toBeNull();
+    expect(tipUp!.dx).toBe(0);
+    expect(tipUp!.dy).toBeLessThan(0);
 
-    const upright = new GyroProcessor(structuredClone(DEFAULT_SETTINGS), 0);
-    upright.processSample({ alpha: 0, beta: 0, gamma: 0, gx: 0, gy: 9.81, gz: 0, timestampMs: 0 });
-    // Turning right with upright phone => negative gamma
-    const uprightRight = upright.processSample({
+    // Moving phone tip down (alpha < 0) => cursor moves down (dy > 0)
+    gyro.resetFilters();
+    gyro.processSample({ alpha: 0, beta: 0, gamma: 0, gx: 0, gy: 0, gz: 9.81, timestampMs: 32 });
+    const tipDown = gyro.processSample({
+      alpha: -40,
+      beta: 0,
+      gamma: 0,
+      gx: 0,
+      gy: 0,
+      gz: 9.81,
+      timestampMs: 48,
+    });
+    expect(tipDown).not.toBeNull();
+    expect(tipDown!.dx).toBe(0);
+    expect(tipDown!.dy).toBeGreaterThan(0);
+
+    // Compass rotation in XY plane to the right (gamma < 0) => cursor moves right (dx > 0, dy === 0)
+    gyro.resetFilters();
+    gyro.processSample({ alpha: 0, beta: 0, gamma: 0, gx: 0, gy: 0, gz: 9.81, timestampMs: 64 });
+    const compassRight = gyro.processSample({
       alpha: 0,
-      beta: 20,
+      beta: 0,
       gamma: -40,
       gx: 0,
-      gy: 9.81,
-      gz: 0,
-      timestampMs: 16,
+      gy: 0,
+      gz: 9.81,
+      timestampMs: 80,
     });
-    expect(uprightRight).not.toBeNull();
-    expect(uprightRight!.dx).toBeGreaterThan(0);
-    expect(uprightRight!.dy).toBeLessThan(0);
+    expect(compassRight).not.toBeNull();
+    expect(compassRight!.dx).toBeGreaterThan(0);
+    expect(compassRight!.dy).toBe(0);
+
+    // Compass rotation in XY plane to the left (gamma > 0) => cursor moves left (dx < 0, dy === 0)
+    gyro.resetFilters();
+    gyro.processSample({ alpha: 0, beta: 0, gamma: 0, gx: 0, gy: 0, gz: 9.81, timestampMs: 96 });
+    const compassLeft = gyro.processSample({
+      alpha: 0,
+      beta: 0,
+      gamma: 40,
+      gx: 0,
+      gy: 0,
+      gz: 9.81,
+      timestampMs: 112,
+    });
+    expect(compassLeft).not.toBeNull();
+    expect(compassLeft!.dx).toBeLessThan(0);
+    expect(compassLeft!.dy).toBe(0);
+
+    // Lateral roll / tilting left-right (beta != 0) => zero movement (null)
+    gyro.resetFilters();
+    gyro.processSample({ alpha: 0, beta: 0, gamma: 0, gx: 0, gy: 0, gz: 9.81, timestampMs: 128 });
+    const rollOnly = gyro.processSample({
+      alpha: 0,
+      beta: 45,
+      gamma: 0,
+      gx: 0,
+      gy: 0,
+      gz: 9.81,
+      timestampMs: 144,
+    });
+    expect(rollOnly).toBeNull();
+    // Zero-gravity invalid sample returns null
+    expect(
+      gyro.processSample({
+        alpha: 40,
+        beta: 0,
+        gamma: -40,
+        gx: 0,
+        gy: 0,
+        gz: 0,
+        timestampMs: 160,
+      }),
+    ).toBeNull();
   });
 
   it("suppresses jitter below deadzone and respects clutch modes", () => {
@@ -84,5 +144,50 @@ describe("GyroProcessor and OneEuroFilter", () => {
     const outputs = inputs.map((v, i) => filter.filter(v, i * 0.016));
     const maxOutput = Math.max(...outputs.slice(1).map(Math.abs));
     expect(maxOutput).toBeLessThan(1.0);
+  });
+
+  it("renders crosshair center button and TV remote media controls inside gyro surface without firing surface clicks", () => {
+    const host = document.createElement("div");
+    const emitted: ClientMsg[] = [];
+    const emitMove = vi.fn();
+    const haptic = vi.fn();
+
+    const handle = renderGyroView(
+      host,
+      structuredClone(DEFAULT_SETTINGS),
+      emitMove,
+      (msg) => emitted.push(msg),
+      haptic,
+    );
+
+    const centerBtn = host.querySelector<HTMLButtonElement>(".gyro-center-btn");
+    expect(centerBtn).not.toBeNull();
+    expect(centerBtn?.querySelector("svg")).not.toBeNull();
+
+    centerBtn!.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    centerBtn!.dispatchEvent(new Event("pointerup", { bubbles: true }));
+    centerBtn!.click();
+
+    expect(emitted).toEqual([{ t: "center" }]);
+
+    const expectedRemoteKeys = [
+      "media_volume_down",
+      "media_play_pause",
+      "media_volume_mute",
+      "media_volume_up",
+    ] as const;
+
+    for (const key of expectedRemoteKeys) {
+      emitted.length = 0;
+      const btn = host.querySelector<HTMLButtonElement>(`.gyro-remote-btn[data-key="${key}"]`);
+      expect(btn).not.toBeNull();
+      btn!.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+      btn!.dispatchEvent(new Event("pointerup", { bubbles: true }));
+      btn!.click();
+      expect(emitted).toEqual([{ t: "key", k: key, s: "tap" }]);
+      expect(emitted.some((m) => m.t === "btn")).toBe(false);
+    }
+
+    handle.destroy();
   });
 });

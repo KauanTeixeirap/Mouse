@@ -12,51 +12,98 @@ def get_hostname() -> str:
     return socket.gethostname()
 
 
+_PROBE_TARGETS: tuple[tuple[str, int], ...] = (
+    ("8.8.8.8", 80),
+    ("1.1.1.1", 80),
+    ("10.255.255.255", 1),
+)
+
+
+def _is_valid_lan_ip(ip: str) -> bool:
+    return bool(ip) and not ip.startswith("127.") and not ip.startswith("169.254.")
+
+
+def _ip_priority(ip: str) -> int:
+    """Lower score = higher priority for physical Wi-Fi/Ethernet LAN adapters."""
+    if ip.startswith("192.168.56."):
+        return 3
+    if ip.startswith("192.168."):
+        return 0
+    if ip.startswith("10."):
+        return 1
+    if ip.startswith("172."):
+        parts = ip.split(".")
+        if len(parts) == 4 and parts[1].isdigit() and 16 <= int(parts[1]) <= 31:
+            return 2
+    return 4
+
+
 def get_primary_ip() -> str:
     """Return the primary LAN IPv4 address used for outbound local routing."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        sock.connect(("10.255.255.255", 1))
-        ip = sock.getsockname()[0]
-        if ip and not ip.startswith("127."):
-            return ip
-    except OSError:
-        pass
-    finally:
-        sock.close()
+    probed: list[str] = []
+    for target in _PROBE_TARGETS:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.connect(target)
+            ip = sock.getsockname()[0]
+            if _is_valid_lan_ip(ip) and ip not in probed:
+                probed.append(ip)
+        except OSError:
+            pass
+        finally:
+            sock.close()
 
+    if probed:
+        probed.sort(key=_ip_priority)
+        return probed[0]
+
+    candidates: list[str] = []
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
             candidate = str(info[4][0])
-            if (
-                candidate
-                and not candidate.startswith("127.")
-                and not candidate.startswith("169.254.")
-            ):
-                return candidate
+            if _is_valid_lan_ip(candidate) and candidate not in candidates:
+                candidates.append(candidate)
     except OSError:
         pass
+    if candidates:
+        candidates.sort(key=_ip_priority)
+        return candidates[0]
     return "127.0.0.1"
 
 
 def get_lan_ips() -> list[str]:
-    """Return deduplicated non-loopback LAN IPv4 addresses, primary IP first."""
+    """Return deduplicated non-loopback LAN IPv4 addresses, physical LAN IPs first."""
     seen: list[str] = []
     primary = get_primary_ip()
     if primary and primary != "127.0.0.1":
         seen.append(primary)
 
+    for target in _PROBE_TARGETS:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.connect(target)
+            ip = sock.getsockname()[0]
+            if _is_valid_lan_ip(ip) and ip not in seen:
+                seen.append(ip)
+        except OSError:
+            pass
+        finally:
+            sock.close()
+
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
             ip = str(info[4][0])
-            if ip.startswith("127.") or ip.startswith("169.254."):
+            if not _is_valid_lan_ip(ip):
                 continue
             if ip not in seen:
                 seen.append(ip)
     except OSError:
         pass
 
-    return seen or ["127.0.0.1"]
+    if not seen:
+        return ["127.0.0.1"]
+    seen.sort(key=_ip_priority)
+    return seen
 
 
 class IPWatcher:

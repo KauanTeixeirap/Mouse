@@ -4,18 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import html
+import ipaddress
 import json
 import socket
 from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
 from .auth import PairingManager
+from .certs import export_ca_der
 from .config import ConfigManager
 from .input.base import InputBackend
 from .network import get_hostname, get_lan_ips
@@ -33,6 +36,7 @@ from .protocol import (
     ProfileSwitchMsg,
     ScrollMsg,
     SettingsSaveMsg,
+    TextFocusMsg,
     TextMsg,
     WelcomeMsg,
     ZoomMsg,
@@ -64,6 +68,21 @@ def _enable_tcp_nodelay(websocket: WebSocket) -> None:
             raw_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     except Exception:
         pass
+
+
+def _extract_request_ipv4(request: Request) -> str | None:
+    """Extract a valid IPv4 address from the HTTP Host header, if present."""
+    raw_host = request.headers.get("host", "").strip()
+    if not raw_host or raw_host.startswith("["):
+        return None
+    host_part = raw_host.split(":", 1)[0].strip()
+    try:
+        parsed = ipaddress.ip_address(host_part)
+    except ValueError:
+        return None
+    if isinstance(parsed, ipaddress.IPv4Address) and not parsed.is_unspecified:
+        return str(parsed)
+    return None
 
 
 def create_app(
@@ -159,6 +178,12 @@ def create_app(
                     backend.scroll(msg.dx, msg.dy)
                 elif isinstance(msg, BtnMsg):
                     backend.button(msg.b, msg.s)
+                    if (
+                        msg.b == "left"
+                        and msg.s in ("click", "up")
+                        and backend.is_editable_focused()
+                    ):
+                        await websocket.send_text(TextFocusMsg().model_dump_json())
                 elif isinstance(msg, ZoomMsg):
                     backend.zoom(msg.d)
                 elif isinstance(msg, TextMsg):
@@ -229,7 +254,12 @@ def create_app(
                 headers = {}
                 if full_path in {"sw.js", "manifest.webmanifest", "index.html"}:
                     headers["Cache-Control"] = "no-cache"
-                return FileResponse(requested, headers=headers)
+                media_type: str | None = None
+                if requested.suffix == ".webmanifest":
+                    media_type = "application/manifest+json"
+                elif requested.suffix == ".js":
+                    media_type = "application/javascript"
+                return FileResponse(requested, media_type=media_type, headers=headers)
 
             index_file = web_dist_dir / "index.html"
             if index_file.exists():
@@ -243,8 +273,9 @@ def create_setup_app(
     ca_cert_path: Path,
     get_https_url: Callable[[], str],
     get_fingerprint: Callable[[], str],
+    ensure_host_ip: Callable[[str], None] | None = None,
 ) -> FastAPI:
-    """Create the HTTP onboarding server exposing only /setup and /mouse-ca.crt."""
+    """Create the HTTP onboarding server exposing /setup, /mouse-ca.crt, and /mouse-ca.cer."""
     setup_app = FastAPI(title="Mouse Setup", version="0.1.0")
 
     @setup_app.get("/")
@@ -252,18 +283,47 @@ def create_setup_app(
         return RedirectResponse(url="/setup")
 
     @setup_app.get("/mouse-ca.crt")
-    async def download_ca() -> FileResponse:
+    async def download_ca(request: Request) -> FileResponse:
+        req_ip = _extract_request_ipv4(request)
+        if req_ip is not None and ensure_host_ip is not None:
+            ensure_host_ip(req_ip)
         if not ca_cert_path.exists():
             raise HTTPException(status_code=404, detail="CA certificate not found")
         return FileResponse(
             path=ca_cert_path,
-            media_type="application/x-x509-ca-cert",
+            media_type="application/octet-stream",
             filename="mouse-ca.crt",
+            headers={"Content-Disposition": 'attachment; filename="mouse-ca.crt"'},
+        )
+
+    @setup_app.get("/mouse-ca.cer")
+    async def download_ca_der(request: Request) -> Response:
+        req_ip = _extract_request_ipv4(request)
+        if req_ip is not None and ensure_host_ip is not None:
+            ensure_host_ip(req_ip)
+        if not ca_cert_path.exists():
+            raise HTTPException(status_code=404, detail="CA certificate not found")
+        der_bytes = export_ca_der(ca_cert_path)
+        return Response(
+            content=der_bytes,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": 'attachment; filename="mouse-ca.cer"'},
         )
 
     @setup_app.get("/setup", response_class=HTMLResponse)
-    async def setup_page() -> HTMLResponse:
-        https_url = html.escape(get_https_url())
+    async def setup_page(request: Request) -> HTMLResponse:
+        base_https_url = get_https_url()
+        req_ip = _extract_request_ipv4(request)
+        if req_ip is not None:
+            if ensure_host_ip is not None:
+                ensure_host_ip(req_ip)
+            parsed = urlsplit(base_https_url)
+            https_port = parsed.port or 8443
+            raw_https_url = f"https://{req_ip}:{https_port}"
+        else:
+            raw_https_url = base_https_url
+
+        https_url = html.escape(raw_https_url)
         fingerprint = html.escape(get_fingerprint())
         body = f"""<!doctype html>
 <html lang="pt-BR">
@@ -281,6 +341,11 @@ def create_setup_app(
       padding: 16px;
       margin: 16px 0;
     }}
+    .warn {{
+      border-left: 4px solid #f59e0b;
+      padding-left: 12px;
+      margin: 12px 0;
+    }}
     .btn {{
       display: inline-block;
       padding: 12px 18px;
@@ -289,42 +354,60 @@ def create_setup_app(
       color: #fff;
       text-decoration: none;
       font-weight: 600;
+      margin-right: 8px;
+      margin-bottom: 8px;
+    }}
+    .btn-secondary {{
+      background: #475569;
     }}
     code {{ word-break: break-all; font-size: 0.85rem; }}
   </style>
 </head>
 <body>
   <h1>Mouse — Configuração Inicial</h1>
-  <p>Siga estes passos uma única vez no Android para conectar ao seu PC com segurança:</p>
+  <p>
+    Siga estes passos uma única vez no Android para confiar no HTTPS
+    e instalar o aplicativo (PWA):
+  </p>
   <div class="card">
-    <h2>1. Baixar o certificado da CA local</h2>
-    <p><a class="btn" href="/mouse-ca.crt">Baixar mouse-ca.crt</a></p>
+    <h2>1. Salvar o certificado da CA na pasta Downloads</h2>
+    <p>
+      <a class="btn" href="/mouse-ca.crt" download="mouse-ca.crt">Baixar mouse-ca.crt</a>
+      <a class="btn btn-secondary" href="/mouse-ca.cer" download="mouse-ca.cer">
+        Alternativo (.cer)
+      </a>
+    </p>
+    <p class="warn">
+      <strong>Importante:</strong> Apenas baixe o arquivo para a pasta <code>Downloads</code>.
+      <strong>Não</strong> toque em "Abrir" na barra de download do Chrome, pois o Android
+      tentará instalar como "Certificado de usuário de VPN e apps", que o Chrome ignora
+      para conexões HTTPS.
+    </p>
     <p>
       <small>Impressão digital SHA-256 para conferência:<br><code>{fingerprint}</code></small>
     </p>
   </div>
   <div class="card">
-    <h2>2. Instalar no Android</h2>
+    <h2>2. Instalar como Certificado CA nas Configurações do Android</h2>
     <ol>
       <li>
         Abra <strong>Configurações → Segurança → Criptografia e credenciais</strong>
-        (ou pesquise por "Instalar certificado").
+        (em Samsung: <strong>Configurações → Segurança e privacidade →
+        Outras configurações de segurança</strong>).
       </li>
-      <li>Toque em <strong>Instalar certificado → Certificado CA</strong>.</li>
-      <li>Selecione o arquivo <code>mouse-ca.crt</code> baixado.</li>
+      <li>Toque em <strong>Instalar um certificado → Certificado CA</strong>.</li>
+      <li>Toque em <strong>Instalar assim mesmo</strong> quando o aviso aparecer.</li>
+      <li>
+        Selecione o arquivo <code>mouse-ca.crt</code> (ou <code>mouse-ca.cer</code>)
+        na pasta <strong>Downloads</strong>.
+      </li>
     </ol>
-    <p>
-      <small>
-        Nota: O Android exibe um aviso padrão dizendo que a rede pode ser monitorada.
-        Isso ocorre para qualquer certificado CA local instalado manualmente.
-      </small>
-    </p>
   </div>
   <div class="card">
-    <h2>3. Abrir o app e parear</h2>
+    <h2>3. Abrir o Mouse em HTTPS e Instalar o App</h2>
     <p>
-      Depois de instalar a CA, escaneie o <strong>QR Code 2</strong> na bandeja do PC
-      ou abra no Chrome:
+      Após instalar como <strong>Certificado CA</strong>, abra o link seguro abaixo no Chrome
+      e toque em <strong>Instalar App</strong>:
     </p>
     <p><a class="btn" href="{https_url}">Abrir Mouse ({https_url})</a></p>
   </div>

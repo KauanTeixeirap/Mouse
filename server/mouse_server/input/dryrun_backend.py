@@ -13,6 +13,7 @@ class DryRunBackend(InputBackend):
     def __init__(self) -> None:
         super().__init__()
         self.events: list[dict[str, Any]] = []
+        self.editable_focused: bool = False
 
     def move(self, dx: float, dy: float) -> None:
         self.events.append({"t": "move", "dx": dx, "dy": dy})
@@ -55,3 +56,6 @@ class DryRunBackend(InputBackend):
             self.events.append({"t": "key", "k": k, "s": "up", "auto": True})
         self.pressed_buttons.clear()
         self.pressed_keys.clear()
+
+    def is_editable_focused(self) -> bool:
+        return self.editable_focused

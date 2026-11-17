@@ -22,6 +22,7 @@ from mouse_server.protocol import (
     ScrollMsg,
     Settings,
     SettingsSaveMsg,
+    TextFocusMsg,
     TextMsg,
     ZoomMsg,
     parse_client_msg,
@@ -53,6 +54,7 @@ def test_parse_all_client_messages() -> None:
     )
     assert isinstance(parse_client_msg({"t": "profile.create", "profile": "TV"}), ProfileCreateMsg)
     assert isinstance(parse_client_msg({"t": "ping", "ts": 1234.5}), PingMsg)
+    assert TextFocusMsg().model_dump() == {"t": "text_focus"}
 
 
 def test_invalid_key_rejected() -> None:
@@ -82,7 +84,7 @@ def test_protocol_matches_typescript_schema() -> None:
     }
     ts_types = set(re.findall(r't:\s*"([^"]+)"', ts_text))
     assert expected_types.issubset(ts_types)
-    assert {"welcome", "kicked", "pong", "error"}.issubset(ts_types)
+    assert {"welcome", "kicked", "pong", "error", "text_focus"}.issubset(ts_types)
 
     # Verify all SPECIAL_KEYS are declared in TS SpecialKeyName
     ts_special_block = (

@@ -1,9 +1,9 @@
 import { OneEuroFilter, applyDeadzone } from "../lib/filters";
-import type { ClientMsg, Settings } from "../protocol";
+import type { ClientMsg, KeyName, Settings } from "../protocol";
 import { GestureRecognizer } from "./trackpad";
 
 export interface GyroSample {
-  /** Rotation rate in deg/s around device axes: alpha=Z, beta=X, gamma=Y */
+  /** Rotation rate in deg/s around device axes: alpha=X (pitch), beta=Y (roll), gamma=Z (XY-plane compass yaw) */
   alpha: number;
   beta: number;
   gamma: number;
@@ -18,18 +18,6 @@ interface Vec3 {
   x: number;
   y: number;
   z: number;
-}
-
-function dot(a: Vec3, b: Vec3): number {
-  return a.x * b.x + a.y * b.y + a.z * b.z;
-}
-
-function cross(a: Vec3, b: Vec3): Vec3 {
-  return {
-    x: a.y * b.z - a.z * b.y,
-    y: a.z * b.x - a.x * b.z,
-    z: a.x * b.y - a.y * b.x,
-  };
 }
 
 function normalize(v: Vec3): Vec3 | null {
@@ -92,25 +80,12 @@ export class GyroProcessor {
     const gHat = normalize({ x: sample.gx, y: sample.gy, z: sample.gz });
     if (!gHat) return null;
 
-    // Project device +X (right edge) onto plane orthogonal to gravity
-    const xAxis: Vec3 = { x: 1, y: 0, z: 0 };
-    const xDotG = dot(xAxis, gHat);
-    let rCandidate: Vec3 = {
-      x: xAxis.x - xDotG * gHat.x,
-      y: xAxis.y - xDotG * gHat.y,
-      z: xAxis.z - xDotG * gHat.z,
-    };
-    let rHat = normalize(rCandidate);
-    if (!rHat) {
-      // Fallback if device +X is nearly vertical (landscape orientation)
-      rCandidate = cross({ x: 0, y: 1, z: 0 }, gHat);
-      rHat = normalize(rCandidate) ?? { x: 0, y: 0, z: 1 };
-    }
-
-    // W3C rotationRate: beta=around X, gamma=around Y, alpha=around Z
-    const omega: Vec3 = { x: sample.beta, y: sample.gamma, z: sample.alpha };
-    const rawYaw = -dot(omega, gHat);
-    const rawPitch = -dot(omega, rHat);
+    // W3C DeviceMotionEvent.rotationRate (§6.3):
+    // - sample.alpha: rotation around device X axis (pitching tip of phone up/down) -> vertical dy
+    // - sample.beta: rotation around device Y axis (rolling/tilting left/right) -> ignored
+    // - sample.gamma: rotation around device Z axis (compass rotation in XY plane) -> horizontal dx
+    const rawYaw = -sample.gamma;
+    const rawPitch = -sample.alpha;
 
     const tSec = sample.timestampMs / 1000;
     const filteredYaw = applyDeadzone(this.yawFilter.filter(rawYaw, tSec), this.deadzoneDegPerSec);
@@ -136,6 +111,17 @@ type MotionEventWithPermission = typeof DeviceMotionEvent & {
   requestPermission?: () => Promise<"granted" | "denied">;
 };
 
+const GYRO_REMOTE_BUTTONS: Array<{
+  key: KeyName;
+  label: string;
+  ariaLabel: string;
+}> = [
+  { key: "media_volume_down", label: "🔉 Vol −", ariaLabel: "Diminuir som" },
+  { key: "media_play_pause", label: "⏯ Play/Pause", ariaLabel: "Play e Pause" },
+  { key: "media_volume_mute", label: "🔇 Mudo", ariaLabel: "Mudo" },
+  { key: "media_volume_up", label: "🔊 Vol +", ariaLabel: "Aumentar som" },
+];
+
 export function renderGyroView(
   container: HTMLElement,
   initialSettings: Settings,
@@ -152,6 +138,28 @@ export function renderGyroView(
 
   const surface = document.createElement("div");
   surface.className = "touch-surface gyro-surface";
+
+  // Crosshair ("mira") calibrate center button inside the main gyro surface
+  const centerBtn = document.createElement("button");
+  centerBtn.type = "button";
+  centerBtn.className = "gyro-center-btn";
+  centerBtn.setAttribute("aria-label", "Calibrar Centro");
+  centerBtn.title = "Calibrar Centro";
+  centerBtn.innerHTML = `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="7"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/></svg>`;
+
+  const stopBtnPointer = (e: Event) => {
+    e.stopPropagation();
+  };
+  const onCenterClick = (e: MouseEvent) => {
+    e.stopPropagation();
+    haptic();
+    processor.resetFilters();
+    emitMsg({ t: "center" });
+  };
+  centerBtn.addEventListener("pointerdown", stopBtnPointer);
+  centerBtn.addEventListener("pointerup", stopBtnPointer);
+  centerBtn.addEventListener("pointercancel", stopBtnPointer);
+  centerBtn.addEventListener("click", onCenterClick);
 
   const statusText = document.createElement("p");
   statusText.style.margin = "0 0 12px 0";
@@ -187,6 +195,31 @@ export function renderGyroView(
   clutchBtn.addEventListener("pointerup", onClutchUp);
   clutchBtn.addEventListener("pointercancel", onClutchUp);
 
+  // TV remote media/volume control panel inside the gyro area
+  const remoteBar = document.createElement("div");
+  remoteBar.className = "gyro-remote";
+  remoteBar.setAttribute("role", "group");
+  remoteBar.setAttribute("aria-label", "Controle de mídia e volume");
+
+  for (const item of GYRO_REMOTE_BUTTONS) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "gyro-remote-btn";
+    btn.dataset.key = item.key;
+    btn.setAttribute("aria-label", item.ariaLabel);
+    btn.title = item.ariaLabel;
+    btn.textContent = item.label;
+    btn.addEventListener("pointerdown", stopBtnPointer);
+    btn.addEventListener("pointerup", stopBtnPointer);
+    btn.addEventListener("pointercancel", stopBtnPointer);
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      haptic();
+      emitMsg({ t: "key", k: item.key, s: "tap" });
+    });
+    remoteBar.appendChild(btn);
+  }
+
   // Surface still accepts 1-finger tap (left click) and 2-finger tap (right click)
   const handleTapCmds = (cmds: ReturnType<GestureRecognizer["onDown"]>) => {
     for (const cmd of cmds) {
@@ -195,6 +228,7 @@ export function renderGyroView(
     }
   };
   const onSurfaceDown = (e: PointerEvent) => {
+    if ((e.target as HTMLElement | null)?.closest("button")) return;
     surface.setPointerCapture?.(e.pointerId);
     handleTapCmds(
       tapRecognizer.onDown({
@@ -206,6 +240,7 @@ export function renderGyroView(
     );
   };
   const onSurfaceUp = (e: PointerEvent) => {
+    if ((e.target as HTMLElement | null)?.closest("button")) return;
     handleTapCmds(
       tapRecognizer.onUp({
         id: e.pointerId,
@@ -272,7 +307,7 @@ export function renderGyroView(
 
   void attachMotionListener();
 
-  surface.append(statusText, clutchBtn);
+  surface.append(centerBtn, statusText, clutchBtn, remoteBar);
   container.appendChild(surface);
 
   return {
@@ -285,6 +320,10 @@ export function renderGyroView(
     destroy() {
       active = false;
       window.removeEventListener("devicemotion", onDeviceMotion);
+      centerBtn.removeEventListener("pointerdown", stopBtnPointer);
+      centerBtn.removeEventListener("pointerup", stopBtnPointer);
+      centerBtn.removeEventListener("pointercancel", stopBtnPointer);
+      centerBtn.removeEventListener("click", onCenterClick);
       clutchBtn.removeEventListener("pointerdown", onClutchDown);
       clutchBtn.removeEventListener("pointerup", onClutchUp);
       clutchBtn.removeEventListener("pointercancel", onClutchUp);

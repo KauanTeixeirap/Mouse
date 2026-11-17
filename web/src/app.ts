@@ -1,4 +1,4 @@
-import { renderKeyboardPanel } from "./keyboard/keyboard";
+import { KeyboardController, renderKeyboardPanel } from "./keyboard/keyboard";
 import { type GyroHandle, renderGyroView } from "./modes/gyro";
 import { attachTrackpad, type TrackpadHandle } from "./modes/trackpad";
 import { type ConnectionState, MouseSocket } from "./net/socket";
@@ -19,6 +19,11 @@ import {
 
 type ActiveTab = "trackpad" | "gyro" | "keyboard" | "settings";
 
+interface BeforeInstallPromptEvent extends Event {
+  prompt(): Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
+}
+
 export function startApp(root: HTMLElement): void {
   const deviceName = getOrCreateDeviceName();
   let activeTab: ActiveTab = "trackpad";
@@ -30,11 +35,35 @@ export function startApp(root: HTMLElement): void {
   let trackpadHandle: TrackpadHandle | null = null;
   let gyroHandle: GyroHandle | null = null;
   let cleanupView: (() => void) | null = null;
+  let deferredInstallPrompt: BeforeInstallPromptEvent | null = null;
   const wakeLock = new WakeLockController();
+  const globalKb = new KeyboardController();
+
+  const globalHiddenInput = document.createElement("textarea");
+  globalHiddenInput.className = "hidden-input";
+  globalHiddenInput.setAttribute("aria-label", "Entrada automática de teclado");
+  globalHiddenInput.autocapitalize = "off";
+  globalHiddenInput.autocomplete = "off";
+  globalHiddenInput.spellcheck = false;
 
   window.addEventListener("storage", (e) => {
     if (e.key === "color-scheme") {
       syncThemeFromStorage();
+    }
+  });
+
+  window.addEventListener("beforeinstallprompt", (e) => {
+    e.preventDefault();
+    deferredInstallPrompt = e as BeforeInstallPromptEvent;
+    if (getStoredToken()) {
+      render();
+    }
+  });
+
+  window.addEventListener("appinstalled", () => {
+    deferredInstallPrompt = null;
+    if (getStoredToken()) {
+      render();
     }
   });
 
@@ -43,6 +72,16 @@ export function startApp(root: HTMLElement): void {
       navigator.vibrate(10);
     }
   };
+
+  function focusAutoKeyboard(): void {
+    const targetInput =
+      activeTab === "keyboard"
+        ? (root.querySelector<HTMLTextAreaElement>(".scroll-panel .hidden-input") ??
+          globalHiddenInput)
+        : globalHiddenInput;
+    targetInput.focus({ preventScroll: true });
+    (navigator as unknown as { virtualKeyboard?: { show?: () => void } }).virtualKeyboard?.show?.();
+  }
 
   const socket = new MouseSocket(deviceName, {
     onStateChange(next) {
@@ -63,6 +102,8 @@ export function startApp(root: HTMLElement): void {
         trackpadHandle?.updateSettings(settings);
         gyroHandle?.updateSettings(settings);
         render();
+      } else if (msg.t === "text_focus") {
+        focusAutoKeyboard();
       } else if (msg.t === "error" && msg.code === "unauthorized") {
         clearStoredToken();
         socket.disconnect();
@@ -74,6 +115,25 @@ export function startApp(root: HTMLElement): void {
   const emitMsg = (msg: ClientMsg) => {
     socket.send(msg);
   };
+
+  globalHiddenInput.addEventListener("beforeinput", (e: InputEvent) => {
+    const msg = globalKb.handleBeforeInput(e.inputType, e.data);
+    if (msg) {
+      emitMsg(msg);
+    }
+    e.preventDefault();
+    globalHiddenInput.value = "";
+  });
+
+  globalHiddenInput.addEventListener("keydown", (e: KeyboardEvent) => {
+    if (e.key === "Backspace") {
+      emitMsg(globalKb.pressKey("backspace"));
+      e.preventDefault();
+    } else if (e.key === "Enter") {
+      emitMsg(globalKb.pressKey("enter"));
+      e.preventDefault();
+    }
+  });
 
   function updateChrome(): void {
     const dot = root.querySelector<HTMLElement>(".status-dot");
@@ -233,24 +293,30 @@ export function startApp(root: HTMLElement): void {
       return btn;
     };
 
-    const centerBtn = document.createElement("button");
-    centerBtn.type = "button";
-    centerBtn.className = "nav-btn";
-    centerBtn.textContent = "Calibrar Centro";
-    centerBtn.disabled = activeTab !== "gyro";
-    centerBtn.addEventListener("click", () => {
-      haptic();
-      emitMsg({ t: "center" });
-    });
-
     topbar.append(
       dot,
       makeTabBtn("trackpad", "Trackpad"),
       makeTabBtn("gyro", "Giroscópio"),
-      centerBtn,
       makeTabBtn("keyboard", "Teclado"),
       makeTabBtn("settings", "⚙"),
     );
+
+    if (deferredInstallPrompt) {
+      const installBtn = document.createElement("button");
+      installBtn.type = "button";
+      installBtn.className = "nav-btn";
+      installBtn.textContent = "📲 Instalar";
+      installBtn.addEventListener("click", async () => {
+        if (!deferredInstallPrompt) return;
+        haptic();
+        const promptEvent = deferredInstallPrompt;
+        deferredInstallPrompt = null;
+        await promptEvent.prompt();
+        await promptEvent.userChoice;
+        render();
+      });
+      topbar.appendChild(installBtn);
+    }
 
     const banner = document.createElement("div");
     banner.className = "banner";
@@ -324,7 +390,7 @@ export function startApp(root: HTMLElement): void {
       );
     }
 
-    root.append(topbar, banner, main);
+    root.append(topbar, banner, main, globalHiddenInput);
     updateChrome();
   }
 

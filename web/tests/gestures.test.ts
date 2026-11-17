@@ -55,13 +55,42 @@ describe("GestureRecognizer", () => {
     );
   });
 
-  it("recognizes 2-finger pinch as zoom", () => {
+  it("does not misfire diagonally offset 2-finger scroll as zoom", () => {
+    const rec = new GestureRecognizer(structuredClone(DEFAULT_SETTINGS));
+    // Two fingers placed at a natural diagonal angle (x=100,y=100 and x=120,y=135)
+    rec.onDown({ id: 1, x: 100, y: 100, timeMs: 0 });
+    rec.onDown({ id: 2, x: 120, y: 135, timeMs: 5 });
+
+    // Sequential per-finger pointermove events scrolling downward in parallel
+    const allCmds = [
+      ...rec.onMove({ id: 1, x: 100, y: 120, timeMs: 16 }),
+      ...rec.onMove({ id: 2, x: 120, y: 155, timeMs: 18 }),
+      ...rec.onMove({ id: 1, x: 100, y: 145, timeMs: 32 }),
+      ...rec.onMove({ id: 2, x: 120, y: 180, timeMs: 34 }),
+      ...rec.onMove({ id: 1, x: 100, y: 170, timeMs: 48 }),
+      ...rec.onMove({ id: 2, x: 120, y: 205, timeMs: 50 }),
+    ];
+
+    expect(allCmds.some((c) => c.kind === "msg" && c.msg.t === "scroll")).toBe(true);
+    expect(allCmds.some((c) => c.kind === "msg" && c.msg.t === "zoom")).toBe(false);
+  });
+
+  it("recognizes 2-finger pinch out and pinch in as zoom", () => {
     const rec = new GestureRecognizer(structuredClone(DEFAULT_SETTINGS));
     rec.onDown({ id: 1, x: 100, y: 100, timeMs: 0 });
     rec.onDown({ id: 2, x: 140, y: 100, timeMs: 0 });
     rec.onMove({ id: 1, x: 80, y: 100, timeMs: 20 });
-    const zoomCmds = rec.onMove({ id: 2, x: 160, y: 100, timeMs: 20 });
-    expect(zoomCmds.some((c) => c.kind === "msg" && c.msg.t === "zoom" && c.msg.d > 0)).toBe(true);
+    const zoomOutCmds = rec.onMove({ id: 2, x: 160, y: 100, timeMs: 20 });
+    expect(zoomOutCmds.some((c) => c.kind === "msg" && c.msg.t === "zoom" && c.msg.d > 0)).toBe(true);
+    rec.onUp({ id: 1, x: 80, y: 100, timeMs: 30 });
+    rec.onUp({ id: 2, x: 160, y: 100, timeMs: 30 });
+
+    // Pinch in (fingers moving towards each other)
+    rec.onDown({ id: 1, x: 60, y: 100, timeMs: 100 });
+    rec.onDown({ id: 2, x: 180, y: 100, timeMs: 100 });
+    rec.onMove({ id: 1, x: 85, y: 100, timeMs: 120 });
+    const zoomInCmds = rec.onMove({ id: 2, x: 155, y: 100, timeMs: 120 });
+    expect(zoomInCmds.some((c) => c.kind === "msg" && c.msg.t === "zoom" && c.msg.d < 0)).toBe(true);
   });
 
   it("recognizes double-tap and hold drag", () => {

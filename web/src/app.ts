@@ -1,4 +1,4 @@
-import { renderBasicKeyboardPanel } from "./keyboard/keyboard";
+import { renderKeyboardPanel } from "./keyboard/keyboard";
 import { type GyroHandle, renderGyroView } from "./modes/gyro";
 import { attachTrackpad, type TrackpadHandle } from "./modes/trackpad";
 import { type ConnectionState, MouseSocket } from "./net/socket";
@@ -258,7 +258,16 @@ export function startApp(root: HTMLElement): void {
 
       main.append(surface, buildMouseButtonsRow());
     } else if (activeTab === "keyboard") {
-      cleanupView = renderBasicKeyboardPanel(main, emitMsg);
+      cleanupView = renderKeyboardPanel(
+        main,
+        activeProfile,
+        settings,
+        emitMsg,
+        haptic,
+        (nextSettings) => {
+          settings = nextSettings;
+        },
+      );
     } else if (activeTab === "gyro") {
       const gyroHost = document.createElement("div");
       gyroHost.style.flex = "1";

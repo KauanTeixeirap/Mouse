@@ -57,3 +57,38 @@ def test_server_cert_regenerates_on_ip_change_keeping_ca(tmp_path: Path) -> None
     san = srv_cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
     san_ips = set(san.get_values_for_type(x509.IPAddress))
     assert ipaddress.ip_address("192.168.1.25") in san_ips
+
+
+def test_live_ssl_context_reloads_new_ip_cert(tmp_path: Path) -> None:
+    import socket
+    import ssl
+    import threading
+
+    bundle1 = ensure_certs(tmp_path, ips=["192.168.1.10"], hostname="MEUPC")
+    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_ctx.load_cert_chain(str(bundle1.server_cert), str(bundle1.server_key))
+
+    bundle2 = ensure_certs(tmp_path, ips=["192.168.1.99"], hostname="MEUPC")
+    server_ctx.load_cert_chain(str(bundle2.server_cert), str(bundle2.server_key))
+
+    client_ctx = ssl.create_default_context(cafile=str(bundle2.ca_cert))
+    s_srv, s_cli = socket.socketpair()
+
+    def _serve() -> None:
+        with server_ctx.wrap_socket(s_srv, server_side=True) as tls_srv:
+            tls_srv.recv(1)
+
+    t = threading.Thread(target=_serve)
+    t.start()
+    try:
+        with client_ctx.wrap_socket(s_cli, server_hostname="192.168.1.99") as tls_cli:
+            tls_cli.send(b"1")
+            der = tls_cli.getpeercert(binary_form=True)
+            assert der is not None
+            peer_cert = x509.load_der_x509_certificate(der)
+            san = peer_cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+            san_ips = {str(ip) for ip in san.get_values_for_type(x509.IPAddress)}
+            assert "192.168.1.99" in san_ips
+    finally:
+        t.join(timeout=5)
+

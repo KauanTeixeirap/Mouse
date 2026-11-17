@@ -152,6 +152,14 @@ def main(argv: list[str] | None = None) -> int:
     def on_ip_change(new_ips: list[str]) -> None:
         nonlocal bundle
         bundle = ensure_certs(data_dir, ips=new_ips, hostname=hostname)
+        if https_config.ssl is not None:
+            try:
+                https_config.ssl.load_cert_chain(
+                    certfile=str(bundle.server_cert),
+                    keyfile=str(bundle.server_key),
+                )
+            except OSError:
+                pass
         tray = status_holder.get("tray")
         if tray is not None and hasattr(tray, "on_ip_changed"):
             tray.on_ip_changed(new_ips)

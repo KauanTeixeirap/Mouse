@@ -10,6 +10,12 @@ import {
   pairWithServer,
 } from "./pairing";
 import { type ClientMsg, DEFAULT_SETTINGS, type Settings } from "./protocol";
+import {
+  WakeLockController,
+  applyThemePreference,
+  renderSettingsPanel,
+  syncThemeFromStorage,
+} from "./settings/settings";
 
 type ActiveTab = "trackpad" | "gyro" | "keyboard" | "settings";
 
@@ -24,6 +30,13 @@ export function startApp(root: HTMLElement): void {
   let trackpadHandle: TrackpadHandle | null = null;
   let gyroHandle: GyroHandle | null = null;
   let cleanupView: (() => void) | null = null;
+  const wakeLock = new WakeLockController();
+
+  window.addEventListener("storage", (e) => {
+    if (e.key === "color-scheme") {
+      syncThemeFromStorage();
+    }
+  });
 
   const haptic = () => {
     if (settings.haptics && typeof navigator.vibrate === "function") {
@@ -45,6 +58,8 @@ export function startApp(root: HTMLElement): void {
         activeProfile = msg.active_profile;
         settings = msg.settings;
         profiles = msg.profiles;
+        applyThemePreference(settings.theme);
+        void wakeLock.setEnabled(settings.wake_lock);
         trackpadHandle?.updateSettings(settings);
         gyroHandle?.updateSettings(settings);
         render();
@@ -282,10 +297,31 @@ export function startApp(root: HTMLElement): void {
       );
       main.append(gyroHost, buildMouseButtonsRow());
     } else {
-      const card = document.createElement("div");
-      card.className = "card";
-      card.innerHTML = `<strong>Perfil:</strong> ${activeProfile} (${profiles.join(", ")})<br><strong>Latência:</strong> ${latencyMs ?? "-"} ms`;
-      main.appendChild(card);
+      renderSettingsPanel(
+        main,
+        {
+          activeProfile,
+          profiles,
+          settings,
+          connState,
+          latencyMs,
+        },
+        {
+          emitMsg,
+          onSettingsChange(next) {
+            settings = next;
+            void wakeLock.setEnabled(next.wake_lock);
+            trackpadHandle?.updateSettings(next);
+            gyroHandle?.updateSettings(next);
+          },
+          onUnpair() {
+            clearStoredToken();
+            socket.disconnect();
+            void wakeLock.setEnabled(false);
+            renderPairingScreen();
+          },
+        },
+      );
     }
 
     root.append(topbar, banner, main);

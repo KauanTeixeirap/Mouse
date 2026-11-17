@@ -16,7 +16,7 @@ Um app instalável (**PWA**) no **Android (Chrome)** para controlar o mouse e o 
 
 ### 1. Baixar e iniciar no PC
 
-1. Baixe o executável `Mouse.exe` na página de **Releases** do repositório (ou execute a partir do código-fonte). https://github.com/KauanTeixeirap/Mouse/releases/tag/v0.1.0
+1. Baixe o executável `Mouse.exe` na página de **Releases** do repositório (ou execute a partir do código-fonte). https://github.com/KauanTeixeirap/Mouse/releases/tag/v0.1.1
 2. Ao abrir pela primeira vez, o **Firewall do Windows** perguntará se o app pode acessar a rede. Marque **Redes privadas** e clique em **Permitir acesso**.
 3. O ícone **Mouse** aparecerá na bandeja do sistema (perto do relógio). Clique nele e escolha **Configurar novo celular**.
 

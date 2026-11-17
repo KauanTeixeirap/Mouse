@@ -1,0 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.spec
+
+# Node / Vite
+node_modules/
+web/dist/
+coverage/
+
+# Environment / local state
+.env
+.env.*
+*.log
